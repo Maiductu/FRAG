@@ -469,14 +469,8 @@ function Core.RedeemAllCodes()
     CodesRedeemed = true
 
     task.spawn(function()
-        local comm = GetCommF()
-        if not comm then
-            for _ = 1, 10 do
-                comm = GetCommF()
-                if comm then break end
-                task.wait(0.5)
-            end
-        end
+        local remotes = ReplicatedStorage:WaitForChild("Remotes", 15)
+        local comm = (remotes and remotes:WaitForChild("CommF_", 15)) or GetCommF()
         if not comm then return end
 
         print("[Kaitun Codes] Redeeming all promo codes now...")
@@ -484,7 +478,10 @@ function Core.RedeemAllCodes()
             pcall(function()
                 comm:InvokeServer("RedeemCode", code)
             end)
-            task.wait(0.1)
+            pcall(function()
+                comm:InvokeServer("redeemCode", code)
+            end)
+            task.wait(0.15)
         end
         print("[Kaitun Codes] Finished redeeming all promo codes!")
     end)
@@ -1763,16 +1760,16 @@ function KaitunBrain.HasQuest(): boolean
         local gui = pg:FindFirstChild(guiName)
         if gui then
             local q = gui:FindFirstChild("Quest")
-            if q and (q.Visible or (q:FindFirstChild("Container") and q.Container.Visible)) then
+            if q and q.Visible == true then
                 return true
             end
         end
     end
 
     for _, gui in ipairs(pg:GetChildren()) do
-        if gui:IsA("ScreenGui") then
+        if gui:IsA("ScreenGui") and gui.Name ~= "Dialogue" and gui.Name ~= "Conversation" then
             local q = gui:FindFirstChild("Quest")
-            if q and (q.Visible or (q:FindFirstChild("Container") and q.Container.Visible)) then
+            if q and q.Visible == true then
                 return true
             end
         end
