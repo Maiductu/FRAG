@@ -18,7 +18,7 @@ print("-------------------------------------------------------------------------
 -- ================================================================================
 local Config = {
     -- 1. Engine & Resource Optimizations (Multi-Account Server Farm)
-    ["Disable 3D Rendering"] = false, -- Set3dRenderingEnabled(false) cuts 70-80% CPU/GPU usage
+    ["Disable 3D Rendering"] = true, -- Set3dRenderingEnabled(false) cuts 70-80% CPU/GPU usage
     ["FPS Cap"] = 30,                -- setfpscap(15) to minimize resource usage on Xeon servers
     ["Auto Reconnect"] = true,       -- Catches Error Codes (268, 277, 279) and auto-reconnects
     ["Enable Watchdog"] = true,      -- Anti-Ghost-State Watchdog (auto-hops server if EXP unchanged for 500s)
@@ -326,6 +326,7 @@ local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local Core = {}
 
 local MeleeAliasMap = {
+    ["Combat"] = "Combat",
     ["Electro"] = "Electric",
     ["Electric"] = "Electric",
     ["WaterKungFu"] = "Water Kung Fu",
@@ -685,8 +686,14 @@ function Core.BatchFastAttack(monName: string, centerPos: Vector3, radius: numbe
             if cfModule then
                 local CombatFramework = require(cfModule)
                 local ac = CombatFramework.activeController
-                if ac and ac.equipped then
-                    ac.hitboxMagnitude = 55
+                if ac then
+                    ac.hitboxMagnitude = 60
+                    ac.timeToNextAttack = 0
+                    ac.increment = 3
+                    ac.attacking = false
+                    if ac.equipped == false then
+                        ac.equipped = true
+                    end
                     if ac.attack then
                         ac:attack()
                     end
@@ -707,18 +714,15 @@ function Core.BatchFastAttack(monName: string, centerPos: Vector3, radius: numbe
             end
         end
 
-        -- Fallback Tool Activation (Auto-Attack: Melee priority, fallback ANY tool if no melee owned)
-        local char = LocalPlayer.Character
-        if char and char:FindFirstChildOfClass("Tool") then
-            local tool = char:FindFirstChildOfClass("Tool")
-            local isMelee = tool.ToolTip == "Melee" or tool:FindFirstChild("Melee") or MeleeAliasMap[tool.Name]
-            -- If it's a melee, OR the player owns no melee at all -> attack with whatever is equipped
-            if isMelee or (not Core.HasAnyMelee()) then
-                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-                VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
-                tool:Activate()
-            end
-        end
+        -- 3. Universal Cross-Platform Virtual Input
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:Button1Down(Vector2.new(0, 0))
+            task.wait(0.01)
+            VirtualUser:Button1Up(Vector2.new(0, 0))
+            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+        end)
     end)
 end
 
@@ -732,16 +736,27 @@ function Core.StartFastAttack()
         while FastAttackRunning do
             task.wait(0.05)
             pcall(function()
-                local char = LocalPlayer.Character
-                if char and char:FindFirstChildOfClass("Tool") then
-                    local tool = char:FindFirstChildOfClass("Tool")
-                    local isMelee = tool.ToolTip == "Melee" or tool:FindFirstChild("Melee") or MeleeAliasMap[tool.Name]
-                    if isMelee or (not Core.HasAnyMelee()) then
-                        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-                        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
-                        tool:Activate()
+                local cfModule = ReplicatedStorage:FindFirstChild("CombatFramework")
+                if cfModule then
+                    local CombatFramework = require(cfModule)
+                    local ac = CombatFramework.activeController
+                    if ac then
+                        ac.hitboxMagnitude = 60
+                        ac.timeToNextAttack = 0
+                        ac.increment = 3
+                        ac.attacking = false
+                        if ac.equipped == false then
+                            ac.equipped = true
+                        end
+                        if ac.attack then
+                            ac:attack()
+                        end
                     end
                 end
+                VirtualUser:CaptureController()
+                VirtualUser:Button1Down(Vector2.new(0, 0))
+                task.wait(0.01)
+                VirtualUser:Button1Up(Vector2.new(0, 0))
             end)
         end
     end)
@@ -1212,10 +1227,11 @@ local MeleeMasteryPriority = {
     "Dragon Talon"     -- Farmed to 400 at Sea 3 (Haunted Castle Lvl 2000-2200)
 }
 
-function Core.GetNextMeleeToMaster(): string?
+function Core.GetNextMeleeToMaster(): string
     if Core.HasMelee("Godhuman") then return "Godhuman" end
 
-    for _, meleeName in ipairs(MeleeMasteryPriority) do
+    for i = #MeleeMasteryPriority, 1, -1 do
+        local meleeName = MeleeMasteryPriority[i]
         if Core.HasMelee(meleeName) then
             local mastery = Core.GetMeleeMastery(meleeName)
             if mastery < 400 then
@@ -1225,11 +1241,22 @@ function Core.GetNextMeleeToMaster(): string?
     end
     if Core.HasMelee("Sharkman Karate") then return "Sharkman Karate" end
     if Core.HasMelee("Death Step") then return "Death Step" end
-    -- If the player owns no melee at all, return nil so we fall back to any equipped tool
-    if Core.HasAnyMelee() then
-        return "Water Kung Fu"
+    if Core.HasMelee("Water Kung Fu") then return "Water Kung Fu" end
+    if Core.HasMelee("Combat") then return "Combat" end
+
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    local char = LocalPlayer.Character
+    for _, container in ipairs({ char, backpack }) do
+        if container then
+            for _, t in ipairs(container:GetChildren()) do
+                if t:IsA("Tool") and (t.ToolTip == "Melee" or MeleeAliasMap[t.Name] or t.Name == "Combat") then
+                    return t.Name
+                end
+            end
+        end
     end
-    return nil
+
+    return "Combat"
 end
 
 local MeleeEquipRemotes = {
@@ -1271,43 +1298,36 @@ function Core.EquipBestWeapon()
         if not char or not char:FindFirstChild("Humanoid") or not backpack then return end
 
         local equipped = char:FindFirstChildOfClass("Tool")
-
-        -- If we have no melee to target, keep whatever tool is equipped (safety fallback)
-        if not targetMelee then
-            if equipped then
-                return -- already holding something (e.g. Katana)
-            end
-            -- equip the first available Tool so the player can attack at all
-            for _, t in ipairs(backpack:GetChildren()) do
-                if t:IsA("Tool") then
-                    char.Humanoid:EquipTool(t)
-                    return
-                end
-            end
-            return
-        end
-
         if equipped and (equipped.Name == targetMelee or (equipped.ToolTip == "Melee" and equipped.Name == targetMelee) or MeleeAliasMap[equipped.Name] == targetMelee) then
             return
         end
 
-        local tool = backpack:FindFirstChild(targetMelee)
+        local tool = backpack:FindFirstChild(targetMelee) or (targetMelee and backpack:FindFirstChild(MeleeAliasMap[targetMelee] or ""))
         if tool and tool:IsA("Tool") then
             char.Humanoid:EquipTool(tool)
         else
-            local now = os.clock()
-            if now - LastMeleeEquipAttempt > 3 then
-                LastMeleeEquipAttempt = now
-                local comm = GetCommF()
-                if comm and MeleeEquipRemotes[targetMelee] then
-                    MeleeEquipRemotes[targetMelee](comm)
-                    task.defer(function()
-                        task.wait(0.2)
-                        local newTool = backpack:FindFirstChild(targetMelee)
-                        if newTool and newTool:IsA("Tool") and char and char:FindFirstChild("Humanoid") then
-                            char.Humanoid:EquipTool(newTool)
-                        end
-                    end)
+            if targetMelee ~= "Combat" and MeleeEquipRemotes[targetMelee] then
+                local now = os.clock()
+                if now - LastMeleeEquipAttempt > 3 then
+                    LastMeleeEquipAttempt = now
+                    local comm = GetCommF()
+                    if comm then
+                        MeleeEquipRemotes[targetMelee](comm)
+                        task.defer(function()
+                            task.wait(0.2)
+                            local newTool = backpack:FindFirstChild(targetMelee)
+                            if newTool and newTool:IsA("Tool") and char and char:FindFirstChild("Humanoid") then
+                                char.Humanoid:EquipTool(newTool)
+                            end
+                        end)
+                    end
+                end
+            else
+                for _, t in ipairs(backpack:GetChildren()) do
+                    if t:IsA("Tool") and (t.ToolTip == "Melee" or MeleeAliasMap[t.Name] or t.Name == "Combat") then
+                        char.Humanoid:EquipTool(t)
+                        break
+                    end
                 end
             end
         end
@@ -1779,7 +1799,11 @@ function KaitunBrain.Run()
 
     if Config["Auto Redeem Codes"] then
         task.spawn(function()
-            while task.wait(30) do
+            task.wait(2)
+            if Core.CheckAndRedeemNextCode then
+                Core.CheckAndRedeemNextCode()
+            end
+            while task.wait(20) do
                 if Core.CheckAndRedeemNextCode then
                     Core.CheckAndRedeemNextCode()
                 end
