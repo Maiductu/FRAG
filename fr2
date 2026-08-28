@@ -423,54 +423,75 @@ function Core.BoostFPS()
 end
 
 -- --------------------------------------------------------------------------------
--- 4. SMART REDEEM CODE MANAGER (Buff-aware & non-wasteful)
+-- 4. PROMO CODES AUTO-REDEEMER (ONE-SHOT SPEEDRUN REDEEM ALL)
 -- --------------------------------------------------------------------------------
 local PromoCodes = {
-    "SUB2GAMERROBOT_EXP1", "Sub2CaptainMaui", "Sub2Fer999", "Enyu_is_Pro", "Magicbus",
-    "JCWK", "Starcodeheo", "Bluxxy", "fudd10_v2", "FUDD10", "BIGNEWS", "THEGREATACE",
-    "SUB2GAMERROBOT_RESET1", "Sub2NoobMaster123", "Sub2UncleKizaru", "Sub2Daigrock",
-    "Axiore", "TantaiGaming", "StrawHatMaine", "Sub2OfficialNoobie", "KITT_RESET",
-    "CHANDLER", "NOOB2PRO", "ADMIN_STRENGTH", "JULYUPDATE_RESET", "SEATROLLING",
-    "24NOOBTOBACON", "NEWTROLL", "SECRET_ADMIN", "ADMIN_TROLL", "STAFFBATTLE", "DRAGONABUSE"
+    "EASTEREXP",
+    "fudd10",
+    "fudd10_V2",
+    "Chandler",
+    "BIGNEWS",
+    "KITT_RESET",
+    "Sub2UncleKizaru",
+    "SUB2GAMERROBOT_RESET1",
+    "Sub2Fer999",
+    "Enyu_is_Pro",
+    "JCWK",
+    "StarcodeHEO",
+    "MagicBUS",
+    "KittGaming",
+    "Sub2CaptainMaui",
+    "Sub2OfficialNoobie",
+    "TheGreatAce",
+    "Sub2NoobMaster123",
+    "Sub2Daigrock",
+    "Axiore",
+    "StrawHatMaine",
+    "TantaiGaming",
+    "Bluxxy",
+    "SUB2GAMERROBOT_EXP1",
+    "ADMIN_STRENGTH",
+    "JULYUPDATE_RESET",
+    "SEATROLLING",
+    "24NOOBTOBACON",
+    "NEWTROLL",
+    "SECRET_ADMIN",
+    "ADMIN_TROLL",
+    "STAFFBATTLE",
+    "DRAGONABUSE",
+    "NOOB2PRO"
 }
 
-local GlobalEnv = (type(getgenv) == "function" and getgenv()) or _G or {}
-GlobalEnv.CurrentCodeIndex = GlobalEnv.CurrentCodeIndex or 1
+local CodesRedeemed = false
 
-function Core.IsExpBoostActive(): boolean
-    local mainGui = LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("Main")
-    if not mainGui then return false end
+function Core.RedeemAllCodes()
+    if CodesRedeemed then return end
+    CodesRedeemed = true
 
-    local expBoost = mainGui:FindFirstChild("ExpBoost") or mainGui:FindFirstChild("Boost")
-    if expBoost and expBoost.Visible then return true end
+    task.spawn(function()
+        local comm = GetCommF()
+        if not comm then
+            for _ = 1, 10 do
+                comm = GetCommF()
+                if comm then break end
+                task.wait(0.5)
+            end
+        end
+        if not comm then return end
 
-    local bottomHUD = mainGui:FindFirstChild("BottomHUDList")
-    if bottomHUD and bottomHUD:FindFirstChild("2xExp") and bottomHUD["2xExp"].Visible then
-        return true
-    end
-
-    return false
+        print("[Kaitun Codes] Redeeming all promo codes now...")
+        for _, code in ipairs(PromoCodes) do
+            pcall(function()
+                comm:InvokeServer("RedeemCode", code)
+            end)
+            task.wait(0.1)
+        end
+        print("[Kaitun Codes] Finished redeeming all promo codes!")
+    end)
 end
 
 function Core.CheckAndRedeemNextCode()
-    pcall(function()
-        if Core.IsExpBoostActive() then return end
-
-        local idx = GlobalEnv.CurrentCodeIndex or 1
-        if idx > #PromoCodes then
-            -- Restart loop so new codes added on future updates get picked up
-            GlobalEnv.CurrentCodeIndex = 1
-            return
-        end
-
-        local code = PromoCodes[idx]
-        local comm = GetCommF()
-        if comm then
-            comm:InvokeServer("RedeemCode", code)
-            -- only advance if the code is not obviously expired (empty response expected; advance anyway to avoid spam)
-            GlobalEnv.CurrentCodeIndex = idx + 1
-        end
-    end)
+    Core.RedeemAllCodes()
 end
 
 -- --------------------------------------------------------------------------------
@@ -1884,14 +1905,11 @@ function KaitunBrain.Run()
 
     if Config["Auto Redeem Codes"] then
         task.spawn(function()
-            task.wait(2)
-            if Core.CheckAndRedeemNextCode then
+            task.wait(1)
+            if Core.RedeemAllCodes then
+                Core.RedeemAllCodes()
+            elseif Core.CheckAndRedeemNextCode then
                 Core.CheckAndRedeemNextCode()
-            end
-            while task.wait(20) do
-                if Core.CheckAndRedeemNextCode then
-                    Core.CheckAndRedeemNextCode()
-                end
             end
         end)
     end
