@@ -19,7 +19,7 @@ print("-------------------------------------------------------------------------
 local Config = {
     -- 1. Engine & Resource Optimizations (Multi-Account Server Farm)
     ["Disable 3D Rendering"] = false, -- Set3dRenderingEnabled(false) cuts 70-80% CPU/GPU usage
-    ["FPS Cap"] = 30,                -- setfpscap(15) to minimize resource usage on Xeon servers
+    ["FPS Cap"] = 30,                -- setfpscap(30) to ensure smooth visuals when monitoring
     ["Auto Reconnect"] = true,       -- Catches Error Codes (268, 277, 279) and auto-reconnects
     ["Enable Watchdog"] = true,      -- Anti-Ghost-State Watchdog (auto-hops server if EXP unchanged for 500s)
     ["Auto Redeem Codes"] = true,    -- Auto-redeems active 2x EXP promo codes
@@ -1736,8 +1736,28 @@ end
 
 function KaitunBrain.HasQuest(): boolean
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
-    local q = pg and pg:FindFirstChild("Main") and pg.Main:FindFirstChild("Quest")
-    return (q and q.Visible) or false
+    if not pg then return false end
+
+    for _, guiName in ipairs({"Main", "Main (minimal)", "Main (mobile)"}) do
+        local gui = pg:FindFirstChild(guiName)
+        if gui then
+            local q = gui:FindFirstChild("Quest")
+            if q and (q.Visible or (q:FindFirstChild("Container") and q.Container.Visible)) then
+                return true
+            end
+        end
+    end
+
+    for _, gui in ipairs(pg:GetChildren()) do
+        if gui:IsA("ScreenGui") then
+            local q = gui:FindFirstChild("Quest")
+            if q and (q.Visible or (q:FindFirstChild("Container") and q.Container.Visible)) then
+                return true
+            end
+        end
+    end
+
+    return false
 end
 
 function KaitunBrain.AcceptQuest(questData)
@@ -1745,6 +1765,18 @@ function KaitunBrain.AcceptQuest(questData)
     if comm and questData then
         pcall(function()
             comm:InvokeServer("StartQuest", questData.NameQuest, questData.LevelQuest)
+            local pg = LocalPlayer:FindFirstChild("PlayerGui")
+            if pg then
+                for _, guiName in ipairs({"Main", "Main (minimal)"}) do
+                    local gui = pg:FindFirstChild(guiName)
+                    if gui then
+                        local diag = gui:FindFirstChild("Dialogue") or gui:FindFirstChild("Conversation")
+                        if diag and diag.Visible then
+                            diag.Visible = false
+                        end
+                    end
+                end
+            end
         end)
     end
 end
@@ -1999,8 +2031,8 @@ function KaitunBrain.Run()
                     end
                 end
             else
-                -- Anti-Stuck Timeout Safeguard (120s)
-                if questStartTime > 0 and (os.clock() - questStartTime > 120) then
+                -- Anti-Stuck Timeout Safeguard (600s)
+                if questStartTime > 0 and (os.clock() - questStartTime > 600) then
                     KaitunBrain.AbandonQuest()
                     activeQuestData = nil
                     questStartTime = 0
