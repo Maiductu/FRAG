@@ -19,7 +19,7 @@ print("-------------------------------------------------------------------------
 local Config = {
     -- 1. Engine & Resource Optimizations (Multi-Account Server Farm)
     ["Disable 3D Rendering"] = false, -- Set3dRenderingEnabled(false) cuts 70-80% CPU/GPU usage
-    ["FPS Cap"] = 60,                -- setfpscap(15) to minimize resource usage on Xeon servers
+    ["FPS Cap"] = 30,                -- setfpscap(15) to minimize resource usage on Xeon servers
     ["Auto Reconnect"] = true,       -- Catches Error Codes (268, 277, 279) and auto-reconnects
     ["Enable Watchdog"] = true,      -- Anti-Ghost-State Watchdog (auto-hops server if EXP unchanged for 500s)
     ["Auto Redeem Codes"] = true,    -- Auto-redeems active 2x EXP promo codes
@@ -456,13 +456,17 @@ function Core.CheckAndRedeemNextCode()
         if Core.IsExpBoostActive() then return end
 
         local idx = GlobalEnv.CurrentCodeIndex or 1
-        if idx > #PromoCodes then return end
+        if idx > #PromoCodes then
+            -- Restart loop so new codes added on future updates get picked up
+            GlobalEnv.CurrentCodeIndex = 1
+            return
+        end
 
         local code = PromoCodes[idx]
         local comm = GetCommF()
         if comm then
-            print("[Kaitun Code Manager] Redeeming next 2x EXP code: " .. code)
             comm:InvokeServer("RedeemCode", code)
+            -- only advance if the code is not obviously expired (empty response expected; advance anyway to avoid spam)
             GlobalEnv.CurrentCodeIndex = idx + 1
         end
     end)
@@ -703,11 +707,13 @@ function Core.BatchFastAttack(monName: string, centerPos: Vector3, radius: numbe
             end
         end
 
-        -- Fallback Tool Activation (Strictly Melee Only)
+        -- Fallback Tool Activation (Auto-Attack: Melee priority, fallback ANY tool if no melee owned)
         local char = LocalPlayer.Character
         if char and char:FindFirstChildOfClass("Tool") then
             local tool = char:FindFirstChildOfClass("Tool")
-            if tool.ToolTip == "Melee" or tool:FindFirstChild("Melee") or MeleeAliasMap[tool.Name] then
+            local isMelee = tool.ToolTip == "Melee" or tool:FindFirstChild("Melee") or MeleeAliasMap[tool.Name]
+            -- If it's a melee, OR the player owns no melee at all -> attack with whatever is equipped
+            if isMelee or (not Core.HasAnyMelee()) then
                 VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
                 VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
                 tool:Activate()
@@ -729,7 +735,8 @@ function Core.StartFastAttack()
                 local char = LocalPlayer.Character
                 if char and char:FindFirstChildOfClass("Tool") then
                     local tool = char:FindFirstChildOfClass("Tool")
-                    if tool.ToolTip == "Melee" or tool:FindFirstChild("Melee") or MeleeAliasMap[tool.Name] then
+                    local isMelee = tool.ToolTip == "Melee" or tool:FindFirstChild("Melee") or MeleeAliasMap[tool.Name]
+                    if isMelee or (not Core.HasAnyMelee()) then
                         VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
                         VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
                         tool:Activate()
@@ -1179,6 +1186,20 @@ function Core.HasMelee(meleeName: string): boolean
     return false
 end
 
+-- Returns true if the player owns ANY melee (checks all known aliases)
+function Core.HasAnyMelee(): boolean
+    local names = {
+        "Water Kung Fu", "Dark Step", "Electric", "Dragon Breath", "Superhuman",
+        "Death Step", "Sharkman Karate", "Electric Claw", "Dragon Talon", "Godhuman"
+    }
+    for _, n in ipairs(names) do
+        if Core.HasMelee(n) then
+            return true
+        end
+    end
+    return false
+end
+
 local MeleeMasteryPriority = {
     "Water Kung Fu",
     "Dark Step",
@@ -1191,7 +1212,7 @@ local MeleeMasteryPriority = {
     "Dragon Talon"     -- Farmed to 400 at Sea 3 (Haunted Castle Lvl 2000-2200)
 }
 
-function Core.GetNextMeleeToMaster(): string
+function Core.GetNextMeleeToMaster(): string?
     if Core.HasMelee("Godhuman") then return "Godhuman" end
 
     for _, meleeName in ipairs(MeleeMasteryPriority) do
@@ -1204,7 +1225,11 @@ function Core.GetNextMeleeToMaster(): string
     end
     if Core.HasMelee("Sharkman Karate") then return "Sharkman Karate" end
     if Core.HasMelee("Death Step") then return "Death Step" end
-    return "Water Kung Fu"
+    -- If the player owns no melee at all, return nil so we fall back to any equipped tool
+    if Core.HasAnyMelee() then
+        return "Water Kung Fu"
+    end
+    return nil
 end
 
 local MeleeEquipRemotes = {
@@ -1246,6 +1271,22 @@ function Core.EquipBestWeapon()
         if not char or not char:FindFirstChild("Humanoid") or not backpack then return end
 
         local equipped = char:FindFirstChildOfClass("Tool")
+
+        -- If we have no melee to target, keep whatever tool is equipped (safety fallback)
+        if not targetMelee then
+            if equipped then
+                return -- already holding something (e.g. Katana)
+            end
+            -- equip the first available Tool so the player can attack at all
+            for _, t in ipairs(backpack:GetChildren()) do
+                if t:IsA("Tool") then
+                    char.Humanoid:EquipTool(t)
+                    return
+                end
+            end
+            return
+        end
+
         if equipped and (equipped.Name == targetMelee or (equipped.ToolTip == "Melee" and equipped.Name == targetMelee) or MeleeAliasMap[equipped.Name] == targetMelee) then
             return
         end
