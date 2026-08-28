@@ -18,7 +18,7 @@ print("-------------------------------------------------------------------------
 -- ================================================================================
 local Config = {
     -- 1. Engine & Resource Optimizations (Multi-Account Server Farm)
-    ["Disable 3D Rendering"] = true, -- Set3dRenderingEnabled(false) cuts 70-80% CPU/GPU usage
+    ["Disable 3D Rendering"] = false, -- Set3dRenderingEnabled(false) cuts 70-80% CPU/GPU usage
     ["FPS Cap"] = 30,                -- setfpscap(15) to minimize resource usage on Xeon servers
     ["Auto Reconnect"] = true,       -- Catches Error Codes (268, 277, 279) and auto-reconnects
     ["Enable Watchdog"] = true,      -- Anti-Ghost-State Watchdog (auto-hops server if EXP unchanged for 500s)
@@ -30,7 +30,7 @@ local Config = {
     ["Auto Allocate Stats"] = true,  -- Auto-allocates stat points based on Stat Priority
     ["Auto Boss Priority"] = true,   -- Săn boss khi còn sống (Awakened Ice Admiral / Tide Keeper / Story Bosses)
     ["Bring Mob"] = true,            -- Gathers mobs safely above ground
-    ["Farm Distance Y"] = 14,         -- Hover height above mobs (Safe from ground attacks)
+    ["Farm Distance Y"] = 11,         -- Hover height above mobs (Safe from ground attacks, perfect melee range)
     ["Batch Attack Radius"] = 300,    -- Multi-Hitbox Batching radius
     ["Fast Attack Speed"] = 0.05,    -- Fast Attack debounce interval (Anti-Kick 267 safe)
 
@@ -480,8 +480,19 @@ function Core.SelectTeam(teamName: string)
     pcall(function()
         if LocalPlayer and (not LocalPlayer.Team or LocalPlayer.Team.Name == "" or LocalPlayer.Team.Name == "Neutral") then
             local comm = GetCommF()
+            local success = false
             if comm then
-                comm:InvokeServer("SetTeam", teamName or "Pirates")
+                pcall(function()
+                    comm:InvokeServer("SetTeam", teamName or "Pirates")
+                    success = true
+                end)
+            end
+            if not success or not LocalPlayer.Team or LocalPlayer.Team.Name == "" then
+                pcall(function()
+                    if type(firesignal) == "function" and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("Main (minimal)") then
+                        firesignal(LocalPlayer.PlayerGui["Main (minimal)"].ChooseTeam.Container.Pirates)
+                    end
+                end)
             end
         end
     end)
@@ -624,11 +635,12 @@ function Core.TweenTo(targetCFrame: CFrame, customSpeed: number?): Tween?
 end
 
 -- --------------------------------------------------------------------------------
--- 9. BRING MOB ENGINE (DESYNC & VOID-SAFE)
+-- 9. BRING MOB ENGINE (PHYSICS-LOCKED & VOID-SAFE)
 -- --------------------------------------------------------------------------------
 function Core.BringMobs(mobName: string, targetPosition: Vector3, radius: number?)
     local maxDistance = radius or 300
     pcall(function()
+        pcall(sethiddenproperty, LocalPlayer, "SimulationRadius", math.huge)
         local enemiesFolder = Workspace:FindFirstChild("Enemies")
         if not enemiesFolder then return end
 
@@ -638,8 +650,23 @@ function Core.BringMobs(mobName: string, targetPosition: Vector3, radius: number
                 if mobHrp.Position.Y > -50 then
                     local distance = (mobHrp.Position - targetPosition).Magnitude
                     if distance <= maxDistance then
+                        local bv = mobHrp:FindFirstChild("FarmingVelocity") or Instance.new("BodyVelocity")
+                        bv.Name = "FarmingVelocity"
+                        bv.MaxForce = Vector3.new(4000, 4000, 4000)
+                        bv.Velocity = Vector3.zero
+                        bv.Parent = mobHrp
+
+                        local bp = mobHrp:FindFirstChild("FarmingPosition") or Instance.new("BodyPosition")
+                        bp.Name = "FarmingPosition"
+                        bp.MaxForce = Vector3.new(4000, 4000, 4000)
+                        bp.P = 4.12
+                        bp.D = 1000
+                        bp.Position = targetPosition
+                        bp.Parent = mobHrp
+
                         mobHrp.CFrame = CFrame.new(targetPosition)
                         mobHrp.CanCollide = false
+                        mobHrp.Size = Vector3.new(20, 20, 20)
                         mob.Humanoid.WalkSpeed = 0
                         mob.Humanoid.AutoRotate = false
                     end
@@ -653,66 +680,114 @@ end
 -- 10. COMBAT FRAMEWORK & MULTI-HITBOX BATCH FAST ATTACK
 -- --------------------------------------------------------------------------------
 local LastBatchAttack = 0
+local CachedNetModule = nil
+local RegAttackRemote = nil
+local RegHitRemote = nil
 
-function Core.BatchFastAttack(monName: string, centerPos: Vector3, radius: number)
+local function GetNetRemotes()
+    if not RegAttackRemote or not RegHitRemote then
+        pcall(function()
+            local modules = ReplicatedStorage:FindFirstChild("Modules")
+            local net = modules and modules:FindFirstChild("Net")
+            if net then
+                CachedNetModule = require(net)
+                if CachedNetModule and type(CachedNetModule.RemoteEvent) == "function" then
+                    RegAttackRemote = CachedNetModule:RemoteEvent("RegisterAttack", true)
+                    RegHitRemote = CachedNetModule:RemoteEvent("RegisterHit", true)
+                end
+            end
+        end)
+        if not RegAttackRemote then
+            local net = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("Net")
+            RegAttackRemote = net and net:FindFirstChild("RegisterAttack")
+            RegHitRemote = net and net:FindFirstChild("RegisterHit")
+        end
+    end
+    return RegAttackRemote, RegHitRemote
+end
+
+local function GetAllBladeHits(radius: number?)
+    local hits = {}
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return hits end
+
+    local maxDist = radius or 65
+    local enemies = Workspace:FindFirstChild("Enemies")
+    if enemies then
+        for _, v in pairs(enemies:GetChildren()) do
+            local hum = v:FindFirstChild("Humanoid")
+            local root = v:FindFirstChild("HumanoidRootPart")
+            if hum and root and hum.Health > 0 then
+                if (root.Position - hrp.Position).Magnitude <= maxDist then
+                    table.insert(hits, v)
+                end
+            end
+        end
+    end
+    return hits
+end
+
+function Core.BatchFastAttack(monName: string?, centerPos: Vector3?, radius: number?)
     local now = os.clock()
     if now - LastBatchAttack < 0.05 then return end
     LastBatchAttack = now
 
     pcall(function()
-        local targets = {}
-        local enemies = Workspace:FindFirstChild("Enemies")
-        if not enemies then return end
+        local regAttack, regHit = GetNetRemotes()
+        local bladehits = GetAllBladeHits(radius or 65)
 
-        local primaryHead = nil
-
-        for _, v in ipairs(enemies:GetChildren()) do
-            local hum = v:FindFirstChildOfClass("Humanoid")
-            local root = v:FindFirstChild("HumanoidRootPart")
-            local head = v:FindFirstChild("Head") or root
-            if v.Name == monName and hum and root and hum.Health > 0 then
-                if (root.Position - centerPos).Magnitude <= radius then
-                    table.insert(targets, { [1] = v, [2] = root })
-                    if not primaryHead and head then
-                        primaryHead = head
-                    end
+        -- 1. Net Module RegisterAttack & Multi-Target RegisterHit (Unpacked Protocol)
+        if #bladehits > 0 and regAttack and regHit then
+            local args = { [1] = nil, [2] = {}, [4] = "078da341" }
+            for _, v in ipairs(bladehits) do
+                local root = v:FindFirstChild("HumanoidRootPart")
+                local head = v:FindFirstChild("Head") or root
+                regAttack:FireServer(0)
+                if not args[1] and head then
+                    args[1] = head
                 end
+                if root then
+                    table.insert(args[2], { [1] = v, [2] = root })
+                end
+                table.insert(args[2], v)
+            end
+            if args[1] then
+                pcall(function()
+                    regHit:FireServer(unpack(args))
+                end)
+                pcall(function()
+                    regHit:FireServer(args[1], args[2])
+                end)
             end
         end
 
-        -- 1. Blox Fruits CombatFramework Integration
+        -- 2. Blox Fruits CombatFramework Integration
         pcall(function()
             local cfModule = ReplicatedStorage:FindFirstChild("CombatFramework")
             if cfModule then
                 local CombatFramework = require(cfModule)
                 local ac = CombatFramework.activeController
                 if ac then
-                    ac.hitboxMagnitude = 60
+                    ac.hitboxMagnitude = 80
                     ac.timeToNextAttack = 0
                     ac.increment = 3
                     ac.attacking = false
-                    if ac.equipped == false then
-                        ac.equipped = true
+                    ac.blocking = false
+                    if ac.currentWeaponModel == nil then
+                        local char = LocalPlayer.Character
+                        local tool = char and char:FindFirstChildOfClass("Tool")
+                        if tool then
+                            ac.currentWeaponModel = tool
+                        end
                     end
+                    ac.equipped = true
                     if ac.attack then
                         ac:attack()
                     end
                 end
             end
         end)
-
-        -- 2. Net Remote Multi-Hitbox RegisterHit
-        if #targets > 0 and primaryHead then
-            local net = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("Net")
-            local registerAttack = net and net:FindFirstChild("RegisterAttack")
-            local registerHit = net and net:FindFirstChild("RegisterHit")
-
-            if registerAttack then registerAttack:FireServer(0) end
-            if registerHit then
-                local fakeHash = tostring(LocalPlayer.UserId):sub(2, 4) .. tostring(math.random(10000, 99999))
-                registerHit:FireServer(primaryHead, targets, {}, fakeHash)
-            end
-        end
 
         -- 3. Universal Cross-Platform Virtual Input
         pcall(function()
@@ -735,29 +810,7 @@ function Core.StartFastAttack()
     task.spawn(function()
         while FastAttackRunning do
             task.wait(0.05)
-            pcall(function()
-                local cfModule = ReplicatedStorage:FindFirstChild("CombatFramework")
-                if cfModule then
-                    local CombatFramework = require(cfModule)
-                    local ac = CombatFramework.activeController
-                    if ac then
-                        ac.hitboxMagnitude = 60
-                        ac.timeToNextAttack = 0
-                        ac.increment = 3
-                        ac.attacking = false
-                        if ac.equipped == false then
-                            ac.equipped = true
-                        end
-                        if ac.attack then
-                            ac:attack()
-                        end
-                    end
-                end
-                VirtualUser:CaptureController()
-                VirtualUser:Button1Down(Vector2.new(0, 0))
-                task.wait(0.01)
-                VirtualUser:Button1Up(Vector2.new(0, 0))
-            end)
+            Core.BatchFastAttack(nil, nil, 65)
         end
     end)
 end
@@ -1966,8 +2019,10 @@ function KaitunBrain.Run()
                         end
                     end
 
-                    local hoverY = Config["Farm Distance Y"] or 14
-                    local targetCombatCFrame = activeQuestData.CFrameMon * CFrame.new(0, hoverY, 0)
+                    local hoverY = Config["Farm Distance Y"] or 11
+                    local mobPos = activeQuestData.CFrameMon.Position
+                    local hoverPos = mobPos + Vector3.new(0, hoverY, 0)
+                    local targetCombatCFrame = CFrame.lookAt(hoverPos, mobPos)
 
                     -- Lock Position on-air (No Rubberbanding)
                     if Core.LockCombatPosition then Core.LockCombatPosition(targetCombatCFrame) end
